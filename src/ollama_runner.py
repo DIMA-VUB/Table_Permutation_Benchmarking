@@ -71,8 +71,8 @@ except ImportError:
 
 def _default_host() -> str:
     """Build the Ollama base URL from OLLAMA_HOST / OLLAMA_PORT env vars."""
-    host = os.environ.get("OLLAMA_HOST", "localhost")
-    port = os.environ.get("OLLAMA_PORT", "11434")
+    host = os.environ.get("OLLAMA_HOST", "localhost").strip()
+    port = os.environ.get("OLLAMA_PORT", "11434").strip()
     return f"http://{host}:{port}"
 
 
