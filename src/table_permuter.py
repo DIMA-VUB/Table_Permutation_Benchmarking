@@ -5,13 +5,14 @@ Core logic for row/column permutation of tabular data entries.
 
 Permutation semantics
 ---------------------
-fix_rows  : int | None  – number of leading rows (indices 0 … fix_rows-1) that
-                          must stay in place.
-                          None  → rows are NOT permuted (axis skipped).
-                          0     → all rows are free (full derangement).
-                          k > 0 → rows 0 … k-1 stay fixed; remaining rows form
-                                  a derangement among themselves.
-fix_cols  : int | None  – same semantics applied to columns.
+fix_rows  : int | list[int] | set[int] | None
+    None          → rows are NOT permuted (axis skipped).
+    0             → all rows are free (full derangement).
+    k  (int > 0)  → rows 0 … k-1 stay fixed; remaining rows form
+                    a derangement among themselves.
+    {i, j, …}    → exactly the listed indices stay fixed; every
+                    other row index forms a derangement.
+fix_cols  : int | list[int] | set[int] | None  – same semantics applied to columns.
 
 Both axes are independent.  Passing None for one axis leaves that axis
 untouched while the other axis is still permuted.
@@ -90,26 +91,56 @@ def _build_permutation(
 # Table permutation
 # ---------------------------------------------------------------------------
 
+# Type alias used throughout the module
+_FixArg = int | list[int] | set[int] | None
+
+
+def _resolve_fixed(fix: _FixArg, n: int) -> set[int] | None:
+    """Convert a fix_rows / fix_cols argument to a set of fixed indices.
+
+    Returns
+    -------
+    None          – the axis should not be permuted at all.
+    set[int]      – the indices that must stay in place; all others are free
+                    to be deranged.
+
+    Accepted forms for *fix*
+    ------------------------
+    None                 → return None  (axis skipped)
+    int k                → return set(range(k))  (first k indices fixed)
+    list[int] / set[int] → return set(fix)  (exactly those indices fixed)
+    """
+    if fix is None:
+        return None
+    if isinstance(fix, (list, set, frozenset)):
+        return set(fix)
+    # plain int: first `fix` indices are fixed
+    return set(range(fix))
+
+
 def _compute_permutations(
     n_rows: int,
     n_cols: int,
-    fix_rows: int | None,
-    fix_cols: int | None,
+    fix_rows: _FixArg,
+    fix_cols: _FixArg,
     seed: int | None,
 ) -> tuple[list[int], list[int]]:
     """Return (row_perm, col_perm) without applying them."""
     rng = random.Random(seed)
     derange = True
 
+    fixed_cols = _resolve_fixed(fix_cols, n_cols)
     col_perm = (
         list(range(n_cols))
-        if fix_cols is None
-        else _build_permutation(n_cols, set(range(fix_cols)), derange=derange, rng=rng)
+        if fixed_cols is None
+        else _build_permutation(n_cols, fixed_cols, derange=derange, rng=rng)
     )
+
+    fixed_rows = _resolve_fixed(fix_rows, n_rows)
     row_perm = (
         list(range(n_rows))
-        if fix_rows is None
-        else _build_permutation(n_rows, set(range(fix_rows)), derange=derange, rng=rng)
+        if fixed_rows is None
+        else _build_permutation(n_rows, fixed_rows, derange=derange, rng=rng)
     )
     return row_perm, col_perm
 
@@ -131,8 +162,8 @@ def _apply_permutations(
 
 def permute_table(
     table: dict[str, Any],
-    fix_rows: int | None = None,
-    fix_cols: int | None = None,
+    fix_rows: _FixArg = None,
+    fix_cols: _FixArg = None,
     seed: int | None = None,
 ) -> dict[str, Any]:
     """Return a *new* table dict with rows and/or columns permuted.
@@ -141,9 +172,11 @@ def permute_table(
     ----------
     table    : dict with keys ``columns`` (list[str]) and ``data``
                (list[list[Any]]).
-    fix_rows : None  → rows are not permuted.
-               0     → full derangement on rows.
-               k > 0 → first k rows stay fixed; rest are deranged.
+    fix_rows : None            → rows are not permuted.
+               0               → full derangement on all rows.
+               k  (int > 0)    → first k rows stay fixed; rest are deranged.
+               list / set[int] → exactly those indices stay fixed; all others
+                                  are deranged.
     fix_cols : same semantics as fix_rows, applied to columns.
     seed     : RNG seed for reproducibility.
 
@@ -205,11 +238,16 @@ def _replace_instruction_table(
 
 def permute_entry(
     entry: dict[str, Any],
-    fix_rows: int | None = None,
-    fix_cols: int | None = None,
+    fix_rows: _FixArg = None,
+    fix_cols: _FixArg = None,
     seed: int | None = None,
 ) -> dict[str, Any]:
-    """Permute a single JSONL entry and return a new dict."""
+    """Permute a single JSONL entry and return a new dict.
+
+    fix_rows / fix_cols accept the same values as :func:`permute_table`.
+    When a list or set of indices is passed, exactly those positions are
+    kept fixed and all remaining positions are deranged.
+    """
     new_entry = copy.deepcopy(entry)
 
     n_rows = len(entry["table"]["data"])
@@ -235,9 +273,13 @@ def permute_entry(
                 new_entry["instruction"], permuted_instr_table, block_start, block_end
             )
 
+    # sets are not JSON-serialisable; convert to sorted lists for the meta field
+    def _ser(v: _FixArg):
+        return sorted(v) if isinstance(v, (set, frozenset)) else v
+
     new_entry["permutation_meta"] = {
-        "fix_rows": fix_rows,
-        "fix_cols": fix_cols,
+        "fix_rows": _ser(fix_rows),
+        "fix_cols": _ser(fix_cols),
         "seed": seed,
     }
     return new_entry
@@ -246,11 +288,14 @@ def permute_entry(
 def permute_jsonl(
     input_path: str | Path,
     output_path: str | Path,
-    fix_rows: int | None = None,
-    fix_cols: int | None = None,
+    fix_rows: _FixArg = None,
+    fix_cols: _FixArg = None,
     seed: int | None = None,
 ) -> list[dict[str, Any]]:
     """Read *input_path*, permute every entry, write to *output_path*.
+
+    fix_rows / fix_cols accept the same values as :func:`permute_table`:
+    ``None``, an ``int``, or a ``list`` / ``set`` of indices to keep fixed.
 
     Returns the list of permuted entries.
     """

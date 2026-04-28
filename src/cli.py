@@ -20,6 +20,14 @@ python cli.py --input data/input.jsonl --output output/ \
 python cli.py --input data/input.jsonl --output output/ \
     --fix-rows 2 --fix-cols 3
 
+# Fix specific row indices 0 and 3; derange all others → output/input_fr0-3_fcNone.jsonl
+python cli.py --input data/input.jsonl --output output/ \
+    --fix-rows 0,3
+
+# Fix specific column indices 1 and 2; derange all other columns
+python cli.py --input data/input.jsonl --output output/ \
+    --fix-cols 1,2
+
 # Reproducible run → output/input_fr0_fc0.jsonl
 python cli.py --input data/input.jsonl --output output/ \
     --fix-rows 0 --fix-cols 0 --seed 42
@@ -42,6 +50,26 @@ sys.path.insert(0, str(Path(__file__).parent))
 from table_permuter import permute_jsonl
 
 
+def _parse_fix_arg(value: str | None) -> int | list[int] | None:
+    """Convert a CLI string for --fix-rows / --fix-cols to the appropriate type.
+
+    Accepted forms
+    --------------
+    Omitted / None  → None        (axis not permuted)
+    "0"             → 0           (full derangement – int 0 means fix first 0 positions)
+    "3"             → 3           (first 3 positions fixed)
+    "0,"            → [0]         (fix only index 0; trailing comma forces list mode)
+    "0,3,5"         → [0, 3, 5]  (fix exactly those indices; rest deranged)
+    """
+    if value is None:
+        return None
+    # Trailing comma → treat as explicit index list even for a single element
+    parts = [p.strip() for p in value.split(",") if p.strip() != ""]
+    if "," in value or len(parts) > 1:
+        return [int(p) for p in parts]
+    return int(parts[0])
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="Permute rows/columns of tabular JSONL data for LLM invariance testing.",
@@ -52,19 +80,23 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--output", "-o", required=True, help="Output folder (created if absent).")
     p.add_argument(
         "--fix-rows",
-        type=int,
+        type=str,
         default=None,
-        metavar="K",
-        help="Number of leading rows to keep fixed. "
-             "0 = full derangement. Omit to leave rows unchanged.",
+        metavar="K_or_INDICES",
+        help="Rows to keep fixed. "
+             "Single int k: fix first k rows (0 = full derangement). "
+             "Comma-separated list e.g. '0,3': fix exactly those row indices, derange the rest. "
+             "Omit to leave rows unchanged.",
     )
     p.add_argument(
         "--fix-cols",
-        type=int,
+        type=str,
         default=None,
-        metavar="K",
-        help="Number of leading columns to keep fixed. "
-             "0 = full derangement. Omit to leave columns unchanged.",
+        metavar="K_or_INDICES",
+        help="Columns to keep fixed. "
+             "Single int k: fix first k columns (0 = full derangement). "
+             "Comma-separated list e.g. '1,2': fix exactly those column indices, derange the rest. "
+             "Omit to leave columns unchanged.",
     )
     p.add_argument("--seed", type=int, default=None, help="RNG seed for reproducibility.")
     p.add_argument(
@@ -78,17 +110,46 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Generate all axis-permutation variants: rows+cols, rows-only, cols-only. "
              "Ignores --fix-rows and --fix-cols.",
     )
-    return p.parse_args(argv)
+    args = p.parse_args(argv)
+    # Convert raw strings to int | list[int] | None
+    args.fix_rows = _parse_fix_arg(args.fix_rows)
+    args.fix_cols = _parse_fix_arg(args.fix_cols)
+    return args
 
 
-def _build_output_path(output_dir: str, input_path: str, fix_rows: int | None, fix_cols: int | None) -> Path:
+def _fix_label(v: int | list[int] | None) -> str:
+    """Compact string representation of a fix_rows/fix_cols value for filenames.
+
+    None        → 'None'
+    0           → '0'
+    3           → '3'
+    [0]         → '[0]'
+    [0, 3, 5]   → '[0,3,5]'
+    """
+    if v is None:
+        return "None"
+    if isinstance(v, list):
+        return "[" + ",".join(str(i) for i in v) + "]"
+    return str(v)
+
+
+def _build_output_path(
+    output_dir: str,
+    input_path: str,
+    fix_rows: int | list[int] | None,
+    fix_cols: int | list[int] | None,
+) -> Path:
     """Build output path: <output_dir>/<input_stem>_fr{fix_rows}_fc{fix_cols}.jsonl
 
-    Example: output/, data/input.jsonl, fix_rows=2, fix_cols=3
-             → output/input_fr2_fc3.jsonl
+    Examples
+    --------
+    fix_rows=2,   fix_cols=3       → input_fr2_fc3.jsonl
+    fix_rows=0,   fix_cols=None    → input_fr0_fcNone.jsonl
+    fix_rows=[0,3], fix_cols=None  → input_fr[0,3]_fcNone.jsonl
+    fix_rows=0,   fix_cols=[0]     → input_fr0_fc[0].jsonl
     """
     stem = Path(input_path).stem
-    suffix = f"_fr{fix_rows}_fc{fix_cols}"
+    suffix = f"_fr{_fix_label(fix_rows)}_fc{_fix_label(fix_cols)}"
     return Path(output_dir) / (stem + suffix + ".jsonl")
 
 
@@ -161,15 +222,33 @@ def main(argv: list[str] | None = None) -> None:
 
 if __name__ == "__main__":
     #  input filenames 
-    Folder_path = r"D:\TABLE_DATASET\TableBench"
-    input_filename = ["TableBench.jsonl", "TableBench_PoT.jsonl", "TableBench_SCoT.jsonl","TableBench_TCoT.jsonl","TableBench_DP.jsonl"]
-    # Generate all variants: fr0_fc0, fr0_fcNone, frNone_fc0
+    Folder_path = r"D:\TABLE_DATASET\TableBench\FactChecking_MatchBased"
+    # input_filename = ["TableBench.jsonl", "TableBench_PoT.jsonl", "TableBench_SCoT.jsonl","TableBench_TCoT.jsonl","TableBench_DP.jsonl"]
+    input_filename = ["TableBench_DP_FactChecking_MatchBased_edited.jsonl"]
     for input_file in input_filename:
+        # Fix first column (index 0), derange all other columns + full row derangement
+        # --fix-rows 0   → int 0 → full row derangement (fix first 0 rows = none fixed)
+        # --fix-cols 0,  → [0]  → pin col index 0; derange all remaining columns
         main([
             "--input",  r"{folder}\{input_file}".format(folder=Folder_path, input_file=input_file),
             "--output", Folder_path,
             "--seed", "42",
-            "--all",
+            "--fix-cols", "0,",   # fix col index 0 only; derange all other columns
         ])
+
+        main([
+            "--input",  r"{folder}\{input_file}".format(folder=Folder_path, input_file=input_file),
+            "--output", Folder_path,
+            "--seed", "42",
+            "--fix-rows", "0",    # full row derangement
+        ])
+
+        # main([
+        #     "--input",  r"{folder}\{input_file}".format(folder=Folder_path, input_file=input_file),
+        #     "--output", Folder_path,
+        #     "--seed", "42",
+        #     "--fix-rows", "0",    # full row derangement
+        #     "--fix-cols", "0,",   # fix col index 0 only; derange all other columns
+        # ])
 
     # main()
